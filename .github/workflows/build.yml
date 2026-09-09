@@ -1,0 +1,126 @@
+name: M115F GSI Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Direct download URL for the BiteTech M115F base ZIP"
+        required: true
+        type: string
+
+      gsi_url:
+        description: "Direct download URL for the GSI ZIP/IMG"
+        required: true
+        type: string
+
+      rom_name:
+        description: "ROM name"
+        required: true
+        default: "AxionOS-2.7"
+        type: string
+
+      build_mode:
+        description: "Build mode"
+        required: true
+        default: "inspect"
+        type: choice
+        options:
+          - inspect
+          - build
+
+jobs:
+  build:
+    name: Build M115F GSI ROM
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Show runner storage
+        run: |
+          echo "=== Disk ==="
+          df -h
+          echo
+          echo "=== Memory ==="
+          free -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            unzip \
+            zip \
+            p7zip-full \
+            curl \
+            wget \
+            file \
+            rsync \
+            jq \
+            bc \
+            e2fsprogs \
+            erofs-utils \
+            simg2img \
+            lz4 \
+            xz-utils
+
+      - name: Run builder
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          GSI_URL: ${{ inputs.gsi_url }}
+          ROM_NAME: ${{ inputs.rom_name }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/build.sh
+
+      - name: Show build directory
+        if: always()
+        run: |
+          echo "=== Build tree ==="
+          find work -maxdepth 3 -type f -printf '%p %s bytes\n' 2>/dev/null || true
+
+      - name: Create release
+        if: success() && inputs.build_mode == 'build'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUTPUT=$(find work/output -maxdepth 1 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$OUTPUT" ]; then
+            echo "No output ROM found."
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$OUTPUT")
+          echo "Output size: $SIZE bytes"
+
+          # GitHub release assets have a 2 GiB per-file limit.
+          MAX=$((2 * 1024 * 1024 * 1024))
+
+          if [ "$SIZE" -ge "$MAX" ]; then
+            echo "ROM is larger than GitHub's 2 GiB release-asset limit."
+            echo "The ROM was created but cannot be uploaded as a GitHub release asset."
+            exit 0
+          fi
+
+          TAG="build-${GITHUB_RUN_NUMBER}"
+
+          gh release create "$TAG" \
+            "$OUTPUT" \
+            --title "${ROM_NAME} M115F build ${GITHUB_RUN_NUMBER}" \
+            --notes "Automated M115F GSI build."
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m115f-build-diagnostics
+          path: |
+            work/logs/
+          if-no-files-found: ignore
