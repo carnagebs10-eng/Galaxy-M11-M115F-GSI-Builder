@@ -65,7 +65,7 @@ jobs:
             bc \
             e2fsprogs \
             erofs-utils \
-            simg2img \
+            android-sdk-libsparse-utils \
             lz4 \
             xz-utils
 
