@@ -1,205 +1,282 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-set -Eeuo pipefail
+echo "========================================"
+echo " M115F GSI Builder"
+echo "========================================"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
 
-WORK="$ROOT/work"
-DOWNLOADS="$WORK/downloads"
-BASE="$WORK/base"
-GSI="$WORK/gsi"
-SUPER="$WORK/super"
-OUTPUT="$WORK/output"
-LOGS="$WORK/logs"
+WORK_DIR="${GITHUB_WORKSPACE:-$(pwd)}/work"
 
-mkdir -p \
-    "$DOWNLOADS" \
-    "$BASE" \
-    "$GSI" \
-    "$SUPER" \
-    "$OUTPUT" \
-    "$LOGS"
+BASE_DIR="$WORK_DIR/base"
+GSI_DIR="$WORK_DIR/gsi"
+TOOLS_DIR="$WORK_DIR/tools"
+OUTPUT_DIR="$WORK_DIR/output"
 
-exec > >(tee "$LOGS/build.log") 2>&1
+BASE_ZIP="$WORK_DIR/base.zip"
+GSI_FILE="$WORK_DIR/gsi_download"
 
-echo "=========================================="
-echo " M115F GSI BUILDER"
-echo "=========================================="
+mkdir -p "$WORK_DIR" "$BASE_DIR" "$GSI_DIR" "$TOOLS_DIR" "$OUTPUT_DIR"
 
 echo
-echo "[*] ROM       : ${ROM_NAME:-unknown}"
-echo "[*] Mode      : ${BUILD_MODE:-inspect}"
-echo "[*] Device    : M115F / m11q"
+echo "[1/8] Checking environment..."
+
+command -v curl >/dev/null || {
+    echo "ERROR: curl is missing."
+    exit 1
+}
+
+command -v unzip >/dev/null || {
+    echo "ERROR: unzip is missing."
+    exit 1
+}
+
+command -v xz >/dev/null || {
+    echo "ERROR: xz is missing."
+    exit 1
+}
+
+echo "Workspace: $WORK_DIR"
+
+# --------------------------------------------------
+# Required variables
+# --------------------------------------------------
+
+: "${BASE_URL:?BASE_URL is required}"
+: "${GSI_URL:?GSI_URL is required}"
+
+ROM_NAME="${ROM_NAME:-AxionOS-2.7}"
+BUILD_MODE="${BUILD_MODE:-inspect}"
+
+echo "ROM name:   $ROM_NAME"
+echo "Build mode: $BUILD_MODE"
+
+# --------------------------------------------------
+# Download base ROM
+# --------------------------------------------------
+
 echo
+echo "[2/8] Downloading M115F base ROM..."
 
-if [[ -z "${BASE_URL:-}" ]]; then
-    echo "ERROR: BASE_URL is missing"
-    exit 1
-fi
+rm -f "$BASE_ZIP"
 
-if [[ -z "${GSI_URL:-}" ]]; then
-    echo "ERROR: GSI_URL is missing"
-    exit 1
-fi
-
-echo "[1/8] Checking disk space..."
-
-AVAILABLE_KB=$(df -Pk "$WORK" | awk 'NR==2 {print $4}')
-AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
-
-echo "Available: ${AVAILABLE_GB} GB"
-
-if [ "$AVAILABLE_GB" -lt 10 ]; then
-    echo
-    echo "WARNING:"
-    echo "The GitHub runner has too little free space."
-    echo "Your BiteTech super.new.img is very large."
-    echo
-    echo "Build stopped before downloading large files."
-    exit 1
-fi
-
-
-echo
-echo "[2/8] Downloading BiteTech base..."
-
-BASE_ZIP="$DOWNLOADS/base.zip"
-
-curl \
+curl -L \
     --fail \
-    --location \
     --retry 3 \
-    --continue-at - \
-    "$BASE_URL" \
-    -o "$BASE_ZIP"
+    --retry-delay 5 \
+    -o "$BASE_ZIP" \
+    "$BASE_URL"
+
+echo "Base downloaded:"
+ls -lh "$BASE_ZIP"
+
+# --------------------------------------------------
+# Download GSI
+# --------------------------------------------------
 
 echo
 echo "[3/8] Downloading GSI..."
 
-GSI_FILE="$DOWNLOADS/gsi"
+rm -f "$GSI_FILE"
 
-curl \
+curl -L \
     --fail \
-    --location \
     --retry 3 \
-    --continue-at - \
-    "$GSI_URL" \
-    -o "$GSI_FILE"
+    --retry-delay 5 \
+    -o "$GSI_FILE" \
+    "$GSI_URL"
+
+echo "GSI downloaded:"
+ls -lh "$GSI_FILE"
+
+# --------------------------------------------------
+# Extract base ROM
+# --------------------------------------------------
 
 echo
-echo "[4/8] Inspecting downloaded files..."
+echo "[4/8] Extracting base ZIP..."
 
-file "$BASE_ZIP"
-file "$GSI_FILE"
+rm -rf "$BASE_DIR"
+mkdir -p "$BASE_DIR"
 
-echo
-echo "[5/8] Extracting base ZIP..."
-
-unzip -q "$BASE_ZIP" -d "$BASE"
+unzip -q "$BASE_ZIP" -d "$BASE_DIR"
 
 echo
 echo "Base contents:"
-find "$BASE" -maxdepth 4 -type f | sort
+find "$BASE_DIR" -maxdepth 3 -type f -printf '%p\n' | sort
 
+# --------------------------------------------------
+# Handle compressed super image
+# --------------------------------------------------
+
+echo
+echo "[5/8] Checking and preparing super image..."
+
+# BiteTech base uses:
+#
+#     super.new.img.xz
+#
+# Convert it to:
+#
+#     super.new.img
+#
+# before inspection.
+
+if [ -f "$BASE_DIR/super.new.img.xz" ]; then
+    echo "Found super.new.img.xz"
+    echo "Decompressing..."
+
+    xz -d -f "$BASE_DIR/super.new.img.xz"
+
+    echo "Decompressed successfully."
+fi
+
+# Also handle the possibility that the ZIP places it
+# somewhere else.
+
+if [ ! -f "$BASE_DIR/super.new.img" ]; then
+    FOUND_SUPER="$(find "$BASE_DIR" -type f -name 'super.new.img' -print -quit || true)"
+
+    if [ -n "$FOUND_SUPER" ]; then
+        echo "Found super image at:"
+        echo "$FOUND_SUPER"
+
+        cp "$FOUND_SUPER" "$BASE_DIR/super.new.img"
+    fi
+fi
+
+# --------------------------------------------------
+# Check required M115F files
+# --------------------------------------------------
 
 echo
 echo "[6/8] Checking required M115F files..."
 
-if [ ! -f "$BASE/boot.img" ]; then
+if [ ! -f "$BASE_DIR/boot.img" ]; then
     echo "ERROR: boot.img was not found."
     exit 1
 fi
 
-if [ ! -f "$BASE/super.new.img" ]; then
+if [ ! -f "$BASE_DIR/super.new.img" ]; then
     echo "ERROR: super.new.img was not found."
+    echo
+    echo "Files matching super:"
+    find "$BASE_DIR" -type f -iname '*super*' -printf '%p\n' || true
     exit 1
 fi
 
-echo "boot.img        OK"
-echo "super.new.img   OK"
-
+echo
+echo "boot.img:"
+ls -lh "$BASE_DIR/boot.img"
 
 echo
-echo "[7/8] Locating BiteTech dynamic-partition tools..."
+echo "super.new.img:"
+ls -lh "$BASE_DIR/super.new.img"
 
-TOOL_DIR="$BASE/META-INF/addons/extra"
+# --------------------------------------------------
+# Extract BiteTech tools
+# --------------------------------------------------
 
-if [ -f "$TOOL_DIR/superunpack" ]; then
-    chmod +x "$TOOL_DIR/superunpack"
-    SUPERUNPACK="$TOOL_DIR/superunpack"
-elif [ -f "$TOOL_DIR/superunpack" ]; then
-    SUPERUNPACK="$TOOL_DIR/superunpack"
+echo
+echo "[7/8] Checking BiteTech tools..."
+
+EXTRA_ZIP="$BASE_DIR/META-INF/addons/extra.zip"
+
+if [ -f "$EXTRA_ZIP" ]; then
+    echo "Found:"
+    echo "$EXTRA_ZIP"
+
+    rm -rf "$TOOLS_DIR"
+    mkdir -p "$TOOLS_DIR"
+
+    unzip -q "$EXTRA_ZIP" -d "$TOOLS_DIR"
+
+    echo
+    echo "BiteTech tools:"
+    find "$TOOLS_DIR" -maxdepth 3 -type f -printf '%p\n' | sort
 else
-    SUPERUNPACK=""
+    echo "WARNING: META-INF/addons/extra.zip was not found."
 fi
 
-if [ -f "$TOOL_DIR/superrepack" ]; then
-    chmod +x "$TOOL_DIR/superrepack"
-    SUPERREPACK="$TOOL_DIR/superrepack"
+# --------------------------------------------------
+# Run inspection
+# --------------------------------------------------
+
+echo
+echo "[8/8] Running inspection..."
+
+chmod +x scripts/*.sh 2>/dev/null || true
+
+echo
+echo "========================================"
+echo " BASE SUPER INSPECTION"
+echo "========================================"
+
+if [ -x "./scripts/inspect_super.sh" ]; then
+    BASE_SUPER="$BASE_DIR/super.new.img" \
+    TOOLS_DIR="$TOOLS_DIR" \
+    ./scripts/inspect_super.sh
 else
-    SUPERREPACK=""
+    echo "WARNING: inspect_super.sh not found."
 fi
 
-echo "superunpack: ${SUPERUNPACK:-NOT FOUND}"
-echo "superrepack: ${SUPERREPACK:-NOT FOUND}"
-
-
 echo
-echo "[8/8] Inspecting super image..."
-
-chmod +x scripts/inspect_super.sh
-scripts/inspect_super.sh \
-    "$BASE/super.new.img" \
-    "$SUPER" \
-    "$SUPERUNPACK"
-
-
-echo
-echo "=========================================="
+echo "========================================"
 echo " GSI INSPECTION"
-echo "=========================================="
+echo "========================================"
 
-chmod +x scripts/inspect_gsi.sh
-scripts/inspect_gsi.sh "$GSI_FILE" "$GSI"
-
-
-echo
-echo "=========================================="
-echo " BUILD MODE"
-echo "=========================================="
-
-if [ "${BUILD_MODE:-inspect}" = "inspect" ]; then
-
-    echo
-    echo "Inspection completed."
-    echo
-    echo "The builder deliberately stopped before modifying"
-    echo "the M115F super image."
-    echo
-    echo "This is intentional until the BiteTech updater-script"
-    echo "and actual super layout have been verified."
-    echo
-
-    exit 0
+if [ -x "./scripts/inspect_gsi.sh" ]; then
+    GSI_INPUT="$GSI_FILE" \
+    GSI_DIR="$GSI_DIR" \
+    ./scripts/inspect_gsi.sh
+else
+    echo "WARNING: inspect_gsi.sh not found."
 fi
 
+# --------------------------------------------------
+# Build mode
+# --------------------------------------------------
 
-if [ "${BUILD_MODE:-inspect}" = "build" ]; then
+if [ "$BUILD_MODE" = "build" ]; then
 
     echo
-    echo "BUILD MODE ENABLED"
+    echo "========================================"
+    echo " BUILD MODE"
+    echo "========================================"
+
+    if [ -x "./scripts/convert_gsi.sh" ]; then
+
+        BASE_DIR="$BASE_DIR" \
+        GSI_DIR="$GSI_DIR" \
+        TOOLS_DIR="$TOOLS_DIR" \
+        OUTPUT_DIR="$OUTPUT_DIR" \
+        ROM_NAME="$ROM_NAME" \
+        ./scripts/convert_gsi.sh
+
+    else
+        echo "ERROR: convert_gsi.sh not found."
+        exit 1
+    fi
+
+else
+
     echo
-
-    chmod +x scripts/convert_gsi.sh
-
-    scripts/convert_gsi.sh \
-        "$BASE" \
-        "$GSI" \
-        "$SUPER" \
-        "$OUTPUT" \
-        "$ROM_NAME"
+    echo "========================================"
+    echo " INSPECTION COMPLETE"
+    echo "========================================"
+    echo
+    echo "Build mode was '$BUILD_MODE'."
+    echo "No ROM was modified or created."
+    echo
+    echo "Use build mode only after the super/GSI"
+    echo "inspection has been verified."
 
 fi
 
 echo
-echo "DONE."
+echo "========================================"
+echo " DONE"
+echo "========================================"
