@@ -1,0 +1,12 @@
+work/
+*.img
+*.zip
+*.xz
+*.gz
+*.7z
+*.tar
+*.tar.xz
+*.tar.gz
+*.log
+
+.env
